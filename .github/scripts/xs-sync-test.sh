@@ -301,12 +301,15 @@ in_repo "${repo}" xs_content_matches up main
 expect "xs_content_matches: a foreign path does not match" "1" "${RC}"
 in_repo "${repo}" xs_main_analyze main no-such-ref
 expect "xs_main_analyze stops when the commit list fails" "1 yes" "${RC} $(grep -q 'git rev-list no-such-ref failed' <<<"${OUT}" && echo yes || echo no)"
-git() { if [[ "$1" == diff ]]; then return 128; fi; command git "$@"; }
-in_repo "${repo}" xs_content_matches up main
+# a git that fails on diff and is real otherwise, ahead of the real one on PATH
+mkdir -p "${scratch}/shim"
+# shellcheck disable=SC2016 # the shim script is meant to be written with $@ unexpanded
+printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = diff ] && exit 128; done\nexec %s "$@"\n' "$(command -v git)" > "${scratch}/shim/git"
+chmod +x "${scratch}/shim/git"
+PATH="${scratch}/shim:${PATH}" in_repo "${repo}" xs_content_matches up main
 expect "xs_content_matches stops when git diff fails" "1 yes" "${RC} $(grep -q 'git diff up main failed' <<<"${OUT}" && echo yes || echo no)"
-in_repo "${repo}" xs_main_analyze main upgh
+PATH="${scratch}/shim:${PATH}" in_repo "${repo}" xs_main_analyze main upgh
 expect "xs_main_analyze stops when git diff fails in the scan" "1 yes" "${RC} $(grep -q 'failed' <<<"${OUT}" && echo yes || echo no)"
-unset -f git
 # upstream holds an xs path: the namespace check dies before anything is built
 G checkout -q -b evilup upgh
 mkdir -p "${repo}/.github/workflows"
