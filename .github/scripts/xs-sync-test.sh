@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Table tests for the mirror and main sync helpers in xs-sync.sh. No network, no
 # GitHub token. Run: .github/scripts/xs-sync-test.sh
-# shellcheck disable=SC2317,SC2329 # mock functions are called indirectly
+# shellcheck disable=SC2310,SC2317,SC2329 # helpers run in && and || on purpose, mock functions are called indirectly
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,14 +36,6 @@ for b in main upstream/main sync/ 'sync/a;b' sync/../main release/x; do
   expect "branch refused ${b}" no "${r}"
 done
 
-# which rules stop a direct push of main
-rules() { printf '%s' "$1" | xs_push_blocked; }
-expect "ruleset: pull request required" yes "$(rules '[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"pull_request"}]')"
-expect "ruleset: status checks" yes "$(rules '[{"type":"required_status_checks"}]')"
-expect "ruleset: merge queue" yes "$(rules '[{"type":"merge_queue"}]')"
-expect "ruleset: only deletion and non-ff" no "$(rules '[{"type":"deletion"},{"type":"non_fast_forward"}]')"
-expect "ruleset: none" no "$(rules '[]')"
-
 # retry with backoff
 cf="$(mktemp)"
 echo 0 > "${cf}"
@@ -66,7 +58,7 @@ in_repo() {
 }
 
 # ---------------------------------------------------------------------------
-# main state
+# main state: main is upstream main plus the patch set (our own xs-* files)
 # ---------------------------------------------------------------------------
 repo="${scratch}/state"
 G() { git -C "${repo}" "$@"; }
@@ -74,39 +66,59 @@ git init -q -b up "${repo}"
 printf 'a\nb\nc\nd\ne\nf\n' > "${repo}/f.txt"
 G add f.txt && G commit -q -m u0
 G checkout -q -b main
-st() { (cd "${repo}" && xs_main_state "$1" "$2"); }
-expect "same" same "$(st main up)"
+mkdir -p "${repo}/.github/scripts" "${repo}/.github/workflows"
+echo script > "${repo}/.github/scripts/xs-sync.sh"
+echo workflow > "${repo}/.github/workflows/xs-sync.yml"
+G add -A && G commit -q -m "patch"
 G checkout -q up
 printf 'a\nb\nc\nd\ne\nf\ng\n' > "${repo}/f.txt" && G commit -q -am u1
 printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > "${repo}/f.txt" && G commit -q -am u2
-expect "fast-forward" ff "$(st main up)"
-# rebase merge of the sync PR: the same patches with new shas
-G checkout -q -b rebased main
-GIT_COMMITTER_DATE="2031-01-01T00:00:00" G cherry-pick up~1 up > /dev/null
-expect "rebased copy has new shas" "no" "$([[ "$(G rev-parse rebased)" == "$(G rev-parse up)" ]] && echo yes || echo no)"
-G checkout -q up
-printf 'a\nb\nc\nd\ne\nf\ng\nh\ni\n' > "${repo}/f.txt" && G commit -q -am u3
-expect "rewritten by a rebase merge" rewritten "$(st rebased up)"
-# squash merge of the sync PR: one commit with the content of u2
+st() { (cd "${repo}" && xs_main_state "$1" "$2"); }
+# base <main> <up>: the base the analysis finds, and the foreign paths
+base_of() { (cd "${repo}" && xs_main_analyze "$1" "$2"; printf '%s|%s' "$(git rev-parse --short "${XS_BASE}")" "${XS_BAD[*]}"); }
+short() { G rev-parse --short "$1"; }
+
+expect "patched main, upstream moved: behind" behind "$(st main up)"
+expect "patched main, base is the old upstream commit" "$(short up~2)|" "$(base_of main up)"
+expect "patched main, upstream not moved: current" current "$(st main up~2)"
+G checkout -q -b plain up
+expect "main equal to upstream main: current" current "$(st plain up)"
+# main merged upstream main (the sync PR merged with a merge commit)
+G checkout -q -b merged main
+G merge -q --no-ff -m "merge" up~1 > /dev/null 2>&1
+expect "merged sync: behind when upstream moved again" behind "$(st merged up)"
+expect "merged sync: base is the merged upstream commit" "$(short up~1)|" "$(base_of merged up)"
+expect "merged sync: current at the merged commit" current "$(st merged up~1)"
+# squash merge of the sync PR: one commit, no upstream ancestry
 G checkout -q -b squashed main
 G checkout up~1 -- f.txt && G commit -q -m squash
-expect "rewritten by a squash merge" rewritten "$(st squashed up)"
-# main has its own commit
+expect "squash merged sync: base found by content" "$(short up~1)|" "$(base_of squashed up)"
+expect "squash merged sync: behind when upstream moved again" behind "$(st squashed up)"
+expect "squash merged sync: current at the squashed commit" current "$(st squashed up~1)"
+# rebase merge: the patch commit replayed on upstream main
+G checkout -q -b rebased up~1
+GIT_COMMITTER_DATE="2031-01-01T00:00:00" G cherry-pick main > /dev/null
+expect "rebase merged sync: base" "$(short up~1)|" "$(base_of rebased up)"
+expect "rebase merged sync: behind" behind "$(st rebased up)"
+expect "rebase merged sync: current" current "$(st rebased up~1)"
+# main changes a path outside the patch set
 G checkout -q -b own main
 echo own > "${repo}/own.txt" && G add own.txt && G commit -q -m "own file"
-expect "diverged by its own commit" diverged "$(st own up)"
-# own commit on top of rebased history
-G checkout -q -b own2 rebased
-echo own > "${repo}/own.txt" && G add own.txt && G commit -q -m "own file"
-expect "diverged after a rebase merge" diverged "$(st own2 up)"
-# own commit that edits an upstream file differently
-G checkout -q -b own3 main
+expect "non-patch file on main: diverged" diverged "$(st own up)"
+expect "diverged lists the path" "$(short up~2)|own.txt" "$(base_of own up)"
+G checkout -q -b own2 main
 printf 'changed\n' > "${repo}/f.txt" && G commit -q -am "own edit"
-expect "diverged by an edit" diverged "$(st own3 up)"
-# own merge commit
-G checkout -q -b own4 main
-G merge -q --no-ff -m "merge" own > /dev/null 2>&1
-expect "diverged by a merge" diverged "$(st own4 up)"
+expect "edit of an upstream file: diverged" diverged "$(st own2 up)"
+expect "edit of an upstream file: path listed" "$(short up~2)|f.txt" "$(base_of own2 up)"
+G checkout -q -b own3 main
+echo x > "${repo}/.github/workflows/other.yml" && G add -A && G commit -q -m "other workflow"
+expect "non-xs workflow on main: diverged" diverged "$(st own3 up)"
+expect "non-xs workflow listed" "$(short up~2)|.github/workflows/other.yml" "$(base_of own3 up)"
+# an own file on top of a squash merge: only the own file is listed
+G checkout -q -b own4 squashed
+echo own > "${repo}/own.txt" && G add own.txt && G commit -q -m "own file"
+expect "own file after a squash merge: diverged" diverged "$(st own4 up)"
+expect "own file after a squash merge: only it is listed" "$(short up~1)|own.txt" "$(base_of own4 up)"
 
 # ---------------------------------------------------------------------------
 # mirror against local repositories
@@ -171,6 +183,7 @@ gh() {
   case "$*" in
     *"--paginate"*) cat "${scratch}/wf" ;;
     *"--method PUT"*) echo "$4" >> "${DISABLED}" ;;
+    *) ;;
   esac
 }
 in_repo "${scratch}" cmd_disable_workflows
@@ -178,33 +191,53 @@ expect "disable-upstream-workflows disables only those" "0 repos/x/y/actions/wor
 unset -f gh
 
 # ---------------------------------------------------------------------------
-# main sync PR handling (the API is mocked; refs live in the scratch repository)
+# main build (the API is mocked; refs live in the scratch repository)
 # ---------------------------------------------------------------------------
-G checkout -q up
+G checkout -q -b upgh up
 mkdir -p "${repo}/.github/workflows"
 echo a > "${repo}/.github/workflows/a@b<c>.yml"
-echo a > "${repo}/.github/workflows/xs-ours.yml"
 G add -A && G commit -q -m "upstream workflow"
 G update-ref refs/remotes/origin/main main
-G update-ref refs/remotes/origin/upstream/main up
-tip="$(G rev-parse up)"
-expect "github changes list the upstream workflow, neutralised, without xs files" "added .github/workflows/a@​b‹c›.yml" "$(cd "${repo}" && xs_github_changes main up | xs_neutralize)"
+G update-ref refs/remotes/origin/upstream/main upgh
+G checkout -q main
+mainsha="$(G rev-parse main)"
+maintree="$(G rev-parse "main^{tree}")"
+upsha="$(G rev-parse upgh)"
+oldup="$(G rev-parse up~2)"
+oldbot="$(G rev-parse up~1)"
+expect "github changes list the upstream workflow, neutralised, without xs files" "added .github/workflows/a@​b‹c›.yml" "$(cd "${repo}" && xs_github_changes up~2 upgh | xs_neutralize)"
 REFSET="${scratch}/refset"
 COMMENTS="${scratch}/comments"
 PRBODY="${scratch}/prbody"
+COMMITS="${scratch}/commits"
 OPENHEADS=""
 STATE="none"
-BRANCHTIP="$(G rev-parse up~1)"
+BRANCHTIP="${oldbot}"
+BOTINFO=""
 MARKED=0
 : > "${REFSET}"
 : > "${COMMENTS}"
+: > "${COMMITS}"
+bot_info() { printf '2\t%s\t%s\tchore(sync): sync upstream main\t%s\t%s\tGitHub\tnoreply@github.com\t%s\n' "$1" "$2" "${XS_BOT_LOGIN}" "${XS_BOT_EMAIL}" "${3:-true}"; }
 main_sync_open_heads() { [[ -z "${OPENHEADS}" ]] || echo "${OPENHEADS}"; }
 pr_state() { echo "${STATE}"; }
 pr_find() { echo 9; }
 api_ref_set() { echo "$1 $2" >> "${REFSET}"; }
 api_branch_exists() { return 1; }
+main_close_issue() { echo "$1" >> "${scratch}/closed-issues"; }
+issue_upsert() { cp "$3" "${scratch}/issue-body"; echo "$1" > "${scratch}/issue-title"; ISSUE_NUMBER=5; }
+ensure_label() { :; }
+# the API commit: a local commit with the given tree and parents
+api_commit() {
+  local t="$2" m="$3" args=() x
+  shift 3
+  for x in "$@"; do args+=(-p "${x}"); done
+  git commit-tree "${t}" -F "${m}" "${args[@]}" | tee -a "${COMMITS}"
+}
 gh() {
   case "$*" in
+    *"@tsv"*) printf '%s\n' "${BOTINFO}" ;;
+    *".verification.verified"*) echo true ;;
     *"git/ref/heads/"*) echo "${BRANCHTIP}" ;;
     *"pr view"*) echo "${MARKED}" ;;
     *"pr comment"*) echo "comment" >> "${COMMENTS}" ;;
@@ -216,41 +249,68 @@ gh() {
     *) echo "unexpected gh $*" >&2; return 1 ;;
   esac
 }
-msync() { in_repo "${repo}" main_sync_pr "${tip}" ff "the ruleset requires a pull request"; }
+export GITHUB_REPOSITORY=x/y
+build() { in_repo "${repo}" main_build --main-sha "${mainsha}" --main-tree "${maintree}" --base "${oldup}" --branch sync/upstream-20261102 "$@"; }
 STATE="closed 7"
-msync
+build
 expect "a closed PR is a skip" "0 yes 0" "${RC} $(grep -q 'skipped by closed PR #7' <<<"${OUT}" && echo yes || echo no) $(wc -l < "${REFSET}")"
 STATE="merged 8"
-msync
+build
 expect "a PR merged today is a skip" "0 yes 0" "${RC} $(grep -q 'is merged' <<<"${OUT}" && echo yes || echo no) $(wc -l < "${REFSET}")"
 STATE="none"
-msync
-expect "a new PR is opened on a new branch" "0 1 yes" "${RC} $(wc -l < "${REFSET}") $(grep -q 'result=pr' <<<"${OUT}" && echo yes || echo no)"
+build
+expect "a new PR is opened on a new branch" "0 1 yes yes" "${RC} $(wc -l < "${REFSET}") $(grep -q 'result=created' <<<"${OUT}" && echo yes || echo no) $(grep -q 'result=created' <<<"${OUT}" && grep -q 'verified=true' <<<"${OUT}" && echo yes || echo no)"
+newtree="$(grep '^tree=' <<<"${OUT}" | cut -d= -f2)"
+newcommit="$(grep '^commit=' <<<"${OUT}" | cut -d= -f2)"
+expect "the commit merges main and upstream main" "${mainsha} ${upsha}" "$(G rev-parse "${newcommit}^1" "${newcommit}^2" | paste -sd' ')"
+expect "the tree differs from upstream main only at patch paths" ".github/scripts/xs-sync.sh .github/workflows/xs-sync.yml" "$(G diff --name-only upgh "${newtree}" | paste -sd' ')"
+expect "the patch files are main's" "$(G rev-parse main:.github/scripts/xs-sync.sh main:.github/workflows/xs-sync.yml | paste -sd' ')" "$(G rev-parse "${newtree}:.github/scripts/xs-sync.sh" "${newtree}:.github/workflows/xs-sync.yml" | paste -sd' ')"
+expect "the tree keeps the upstream change" "$(G rev-parse upgh:f.txt)" "$(G rev-parse "${newtree}:f.txt")"
 expect "the PR body lists upstream workflow changes, neutralised" "yes yes no" "$(grep -q 'Upstream changes under .github (1)' "${PRBODY}" && echo yes || echo no) $(grep -q 'added .github/workflows/a@​b‹c›.yml' "${PRBODY}" && echo yes || echo no) $(grep -q 'xs-ours' "${PRBODY}" && echo yes || echo no)"
-# an open bot PR whose branch holds upstream commits only is moved to the new tip
+expect "the commit subject is the bot subject" "chore(sync): sync upstream main" "$(G log -n1 --format=%s "${newcommit}")"
+expect "--no-pr opens no PR" "yes" "$(rm -f "${PRBODY}"; build --no-pr; [[ ! -e "${PRBODY}" ]] && echo yes || echo no)"
+# an open bot PR that is behind is rebuilt
 : > "${REFSET}"
-OPENHEADS="sync/upstream-20261101"
-msync
-expect "an open bot PR is refreshed" "0 sync/upstream-20261101 ${tip}" "${RC} $(cat "${REFSET}")"
-BRANCHTIP="${tip}"
+STATE="open 9"
+BOTINFO="$(bot_info "${mainsha}" "${oldbot}")"
+BRANCHTIP="${oldbot}"
+build
+expect "an open bot PR is refreshed" "0 sync/upstream-20261102 yes" "${RC} $(awk '{ print $1 }' "${REFSET}") $(grep -q 'result=refreshed' <<<"${OUT}" && echo yes || echo no)"
+# main moved: same upstream, new main
+BOTINFO="$(bot_info "${oldup}" "${upsha}")"
 : > "${REFSET}"
-msync
+build
+expect "an open bot PR is rebuilt when main moved" "yes" "$(grep -q 'result=refreshed' <<<"${OUT}" && echo yes || echo no)"
+BOTINFO="$(bot_info "${mainsha}" "${upsha}")"
+: > "${REFSET}"
+build
 expect "an up to date PR is left alone" "0 0 yes" "${RC} $(wc -l < "${REFSET}") $(grep -q 'result=exists' <<<"${OUT}" && echo yes || echo no)"
-# a branch with a commit that is not upstream's: a comment, once
-BRANCHTIP="$(G rev-parse own)"
+# a human's tip: a comment, once, and nothing is written
+BOTINFO="$(bot_info "${mainsha}" "${oldbot}" false)"
 : > "${COMMENTS}"
-msync
-expect "a PR with human commits needs a manual update" "0 yes 0 1" "${RC} $(grep -q 'result=needs-manual' <<<"${OUT}" && echo yes || echo no) $(wc -l < "${REFSET}") $(wc -l < "${COMMENTS}")"
+: > "${REFSET}"
+build
+expect "a PR with a human tip needs a manual update" "0 yes 0 1" "${RC} $(grep -q 'result=needs-manual' <<<"${OUT}" && echo yes || echo no) $(wc -l < "${REFSET}") $(wc -l < "${COMMENTS}")"
 MARKED=1
-msync
+build
 expect "the manual-update comment is not repeated" "1" "$(wc -l < "${COMMENTS}")"
-# the branch moved between the check and the update: not overwritten, needs a manual update
-BRANCHTIP="$(G rev-parse up~1)"
+MARKED=0
+# a tip whose second parent is not upstream main is a human's
+BOTINFO="$(bot_info "${mainsha}" "$(G rev-parse own)")"
+(cd "${repo}" && branch_tip_is_bot sync/x) && r=bot || r=human
+expect "a second parent outside upstream main is a human's" human "${r}"
+BOTINFO="$(bot_info "${mainsha}" "${oldbot}")"
+(cd "${repo}" && branch_tip_is_bot sync/x) && r=bot || r=human
+expect "a verified bot commit is the bot's" bot "${r}"
+BOTINFO="$(printf '1\t%s\t\tchore(sync): sync upstream main\t%s\t%s\tGitHub\tnoreply@github.com\ttrue' "${mainsha}" "${XS_BOT_LOGIN}" "${XS_BOT_EMAIL}")"
+(cd "${repo}" && branch_tip_is_bot sync/x) && r=bot || r=human
+expect "a single parent commit is a human's" human "${r}"
+# the branch moved between the check and the refresh: not overwritten
+BOTINFO="$(bot_info "${mainsha}" "${oldbot}")"
 api_ref_set_if() { return 1; }
 : > "${REFSET}"
 : > "${COMMENTS}"
-MARKED=0
-msync
+build --base "${oldup}"
 expect "a branch that moved during the refresh is not overwritten" "0 yes 0 1" "${RC} $(grep -q 'result=needs-manual' <<<"${OUT}" && echo yes || echo no) $(wc -l < "${REFSET}") $(wc -l < "${COMMENTS}")"
 unset -f api_ref_set_if
 # shellcheck source=/dev/null
@@ -265,25 +325,141 @@ api_ref_set_if b1 cafe bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb && r=moved || r=
 expect "api_ref_set_if moves an unchanged tip" "moved b1 cafe" "${r} $(cat "${REFSET}")"
 unset -f gh api_ref_set
 # only bot heads are looked at
-unset -f main_sync_open_heads
-# shellcheck source=/dev/null
-source "${here}/xs-sync.sh"
-set +e
 gh() { printf '%s' '[{"headRefName":"sync/upstream-20261101","isCrossRepository":false},{"headRefName":"sync/upstream-fix","isCrossRepository":false},{"headRefName":"sync/upstream-20261101-x","isCrossRepository":false},{"headRefName":"sync/upstream-20261102","isCrossRepository":true}]'; }
 expect "main sync looks only at sync/upstream-YYYYMMDD heads" "sync/upstream-20261101" "$(main_sync_open_heads)"
-unset -f gh pr_state pr_find api_ref_set api_branch_exists
+unset -f gh
 
-# the diverged issue lists commit subjects in a fenced block, neutralised
+# ---------------------------------------------------------------------------
+# a patch that does not apply opens the conflicts issue and pushes nothing
+# ---------------------------------------------------------------------------
+source "${here}/xs-sync.sh"
+set +e
+crepo="${scratch}/conflict"
+C() { git -C "${crepo}" "$@"; }
+git init -q -b up "${crepo}"
+mkdir -p "${crepo}/.github/scripts"
+printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n' > "${crepo}/.github/scripts/xs-sync.sh"
+C add -A && C commit -q -m u0
+C checkout -q -b main
+printf '1\n2\n3\nours\n5\n6\n7\n8\n9\n' > "${crepo}/.github/scripts/xs-sync.sh" && C commit -q -am patch
+C checkout -q up
+printf '1\n2\n3\ntheirs\n5\n6\n7\n8\n9\n' > "${crepo}/.github/scripts/xs-sync.sh" && C commit -q -am u1
+C update-ref refs/remotes/origin/upstream/main up
+cbase="$(C rev-parse up~1)"
+ISSUE="${scratch}/issue"
+: > "${ISSUE}"
+gh() { echo "unexpected gh $*" >&2; return 1; }
+issue_upsert() { echo "$1" >> "${ISSUE}"; cp "$3" "${scratch}/cissue-body"; ISSUE_NUMBER=5; }
+ensure_label() { :; }
+api_commit() { echo "unexpected api_commit" >&2; return 1; }
+api_ref_set() { echo "unexpected api_ref_set" >&2; return 1; }
+pr_state() { echo none; }
+in_repo "${crepo}" main_build --main-sha "$(C rev-parse main)" --main-tree "$(C rev-parse 'main^{tree}')" --base "${cbase}" --branch sync/upstream-20261102
+expect "a conflicting patch opens the conflicts issue and pushes nothing" "0 yes yes issue=5" "${RC} $(grep -qx 'result=conflict' <<<"${OUT}" && echo yes || echo no) $(grep -qx 'sync: upstream main conflicts' "${ISSUE}" && echo yes || echo no) $(grep '^issue=' <<<"${OUT}")"
+expect "the conflicts issue names the file" "yes" "$(grep -q 'xs-sync.sh' "${scratch}/cissue-body" && echo yes || echo no)"
+unset -f gh issue_upsert ensure_label api_commit api_ref_set pr_state
+
+# ---------------------------------------------------------------------------
+# cmd_main_sync decisions
+# ---------------------------------------------------------------------------
+source "${here}/xs-sync.sh"
+set +e
+CALLS="${scratch}/calls"
+main_build() { echo "build $*" >> "${CALLS}"; }
+main_diverged_issue() { echo "diverged-issue" >> "${CALLS}"; }
+main_sync_close_prs() { echo "close-prs" >> "${CALLS}"; }
+main_close_issue() { echo "close $1" >> "${CALLS}"; }
+main_sync_branch() { echo sync/upstream-20261102; }
+sync_with() {
+  G update-ref refs/remotes/origin/main "$1"
+  G update-ref refs/remotes/origin/upstream/main "$2"
+  : > "${CALLS}"
+  in_repo "${repo}" cmd_main_sync "${@:3}"
+}
+sync_with main up
+expect "patched and upstream moved: build" "yes" "$(grep -q "^build --main-sha $(G rev-parse main) --main-tree $(G rev-parse 'main^{tree}') --base $(G rev-parse up~2) --upstream origin/upstream/main --branch sync/upstream-20261102\$" "${CALLS}" && echo yes || echo no)"
+expect "patched and upstream moved: the diverged issue is closed, no build of an issue" "close sync: main has diverged from upstream" "$(grep '^close' "${CALLS}")"
+sync_with main up~2
+expect "patched and upstream not moved: nothing to build, issues and PRs closed" "close-prs|close sync: main has diverged from upstream|close sync: upstream main conflicts" "$(paste -sd'|' "${CALLS}")"
+sync_with own up
+expect "non-patch change: diverged issue" "diverged-issue" "$(cat "${CALLS}")"
+expect "non-patch change: the path is printed" "yes" "$(grep -q -- '- own.txt' <<<"${OUT}" && echo yes || echo no)"
+sync_with own up --dry-run
+expect "dry run of a diverged main writes nothing" "" "$(cat "${CALLS}")"
+sync_with main up --dry-run
+expect "dry run of a patched main writes nothing and reports the patch applies" "yes " "$(grep -q 'the patch applies' <<<"${OUT}" && echo yes || echo no) $(cat "${CALLS}")"
+sync_with squashed up
+expect "squash merged earlier sync: build on the squashed base" "yes" "$(grep -q -- "--base $(G rev-parse up~1) " "${CALLS}" && echo yes || echo no)"
+unset -f main_build main_diverged_issue main_sync_close_prs main_close_issue main_sync_branch
+
+# shellcheck disable=SC2016 # backticks are part of the expected text
+# the diverged issue lists the paths and commit subjects, fenced and neutralised
+source "${here}/xs-sync.sh"
+set +e
 G checkout -q -b evil main
+mkdir -p "${repo}/@org"
+echo x > "${repo}/@org/x.txt" && G add -A
 # shellcheck disable=SC2016 # backticks are part of the subject
-git -C "${repo}" -c user.name=t -c user.email=t@t commit -q --allow-empty -m 'fix @org/team <script> `x`'
+git -C "${repo}" commit -q -m 'fix @org/team <script> `x`'
 G update-ref refs/remotes/origin/main evil
-issue_upsert() { printf '%s' "$3" > "${scratch}/issue-path"; cp "$3" "${scratch}/issue-body"; }
+G update-ref refs/remotes/origin/upstream/main up
+issue_upsert() { cp "$3" "${scratch}/issue-body"; }
 ensure_label() { :; }
 in_repo "${repo}" main_diverged_issue origin/main origin/upstream/main
-expect "diverged issue is fenced and neutralised" "yes no no" "$(grep -q '^```$' "${scratch}/issue-body" && echo yes || echo no) $(grep -q '@org' "${scratch}/issue-body" && echo yes || echo no) $(grep -q '<script>' "${scratch}/issue-body" && echo yes || echo no)"
+expect "diverged issue is fenced and neutralised" "yes no no" "$(grep -q '^```$' "${scratch}/issue-body" && echo yes || echo no) $(grep -q '@org/team' "${scratch}/issue-body" && echo yes || echo no) $(grep -q '<script>' "${scratch}/issue-body" && echo yes || echo no)"
+# shellcheck disable=SC2016 # backticks are part of the expected text
+expect "diverged issue lists the path" "yes" "$(grep -q -- '- `@org/x.txt`' "${scratch}/issue-body" && echo yes || echo no)"
 unset -f issue_upsert ensure_label
 G checkout -q main
+
+# ---------------------------------------------------------------------------
+# rehearsal: base = an older upstream main commit plus our patch, target = upstream main
+# ---------------------------------------------------------------------------
+source "${here}/xs-sync.sh"
+set +e
+rrepo="${scratch}/rehearsal"
+R() { git -C "${rrepo}" "$@"; }
+git init -q -b up "${rrepo}"
+for i in 1 2 3 4 5; do echo "${i}" > "${rrepo}/f.txt" && R add f.txt && R commit -q -m "u${i}"; done
+R checkout -q -b ci up
+mkdir -p "${rrepo}/.github/workflows"
+echo patch > "${rrepo}/.github/workflows/xs-sync.yml" && R add -A && R commit -q -m patch
+R update-ref refs/remotes/origin/upstream/main up
+R update-ref refs/remotes/origin/main ci
+RCALLS="${scratch}/rcalls"
+: > "${RCALLS}"
+gh() {
+  local LASTCOMMIT
+  LASTCOMMIT="$(grep -E '^[0-9a-f]{40}$' "${RCALLS}" | tail -n1)"
+  case "$*" in
+    *"git/commits/"*"--jq .tree.sha"*) git cat-file -p "${LASTCOMMIT}" | sed -n 's/^tree //p' ;;
+    *"git/commits/"*"parents"*) git cat-file -p "${LASTCOMMIT}" | sed -n 's/^parent //p' | paste -sd, ;;
+    *"git/commits/"*) echo true ;;
+    *"git/ref/heads/"*) return 1 ;;
+    *) echo "unexpected gh $*" >&2; return 1 ;;
+  esac
+}
+api_commit() {
+  local t="$2" m="$3" args=() x
+  shift 3
+  for x in "$@"; do args+=(-p "${x}"); done
+  git commit-tree "${t}" -F "${m}" "${args[@]}" | tee -a "${RCALLS}"
+}
+api_ref_set() { echo "set $1" >> "${RCALLS}"; }
+api_ref_delete() { echo "delete $1" >> "${RCALLS}"; }
+api_branch_exists() { return 1; }
+issue_find() { :; }
+cmd_main_sync() { echo "decision $*"; }
+pr_state() { echo "unexpected pr_state" >&2; return 1; }
+export GITHUB_RUN_ID=77
+OUT="$(cd "${rrepo}" && XS_REHEARSAL_BACK=2 cmd_rehearse_main 2>&1)"
+RC=$?
+[[ "${RC}" == 0 ]] || echo "${OUT}"
+expect "rehearsal passes" "0" "${RC}"
+expect "rehearsal built the patched upstream tip" "yes" "$(grep -q 'rehearsal main OK' <<<"${OUT}" && echo yes || echo no)"
+expect "rehearsal opens no PR and cleans its branch" "set rehearsal-sync/main-77|delete rehearsal-sync/main-77" "$(grep -E '^(set|delete)' "${RCALLS}" | paste -sd'|')"
+expect "rehearsal base is an older upstream commit" "yes" "$(grep -q "base $(R rev-parse up~2)," <<<"${OUT}" && echo yes || echo no)"
+unset -f gh api_commit api_ref_set api_ref_delete api_branch_exists issue_find cmd_main_sync pr_state
 
 echo "pass=${pass} fail=${fail}"
 [[ "${fail}" -eq 0 ]]
