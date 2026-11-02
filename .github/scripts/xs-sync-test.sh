@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Table tests for the mirror and main sync helpers in xs-sync.sh. No network, no
 # GitHub token. Run: .github/scripts/xs-sync-test.sh
-# shellcheck disable=SC2310,SC2317,SC2329 # helpers run in && and || on purpose, mock functions are called indirectly
+# shellcheck disable=SC2034,SC2154,SC2310,SC2317,SC2329 # helpers run in && and || on purpose, mock functions are called indirectly, names are set by the sourced script
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -332,6 +332,7 @@ unset -f gh
 # ---------------------------------------------------------------------------
 # a patch that does not apply opens the conflicts issue and pushes nothing
 # ---------------------------------------------------------------------------
+# shellcheck source=/dev/null
 source "${here}/xs-sync.sh"
 set +e
 crepo="${scratch}/conflict"
@@ -362,6 +363,7 @@ unset -f gh issue_upsert ensure_label api_commit api_ref_set pr_state
 # ---------------------------------------------------------------------------
 # cmd_main_sync decisions
 # ---------------------------------------------------------------------------
+# shellcheck source=/dev/null
 source "${here}/xs-sync.sh"
 set +e
 CALLS="${scratch}/calls"
@@ -394,6 +396,7 @@ unset -f main_build main_diverged_issue main_sync_close_prs main_close_issue mai
 
 # shellcheck disable=SC2016 # backticks are part of the expected text
 # the diverged issue lists the paths and commit subjects, fenced and neutralised
+# shellcheck source=/dev/null
 source "${here}/xs-sync.sh"
 set +e
 G checkout -q -b evil main
@@ -415,6 +418,7 @@ G checkout -q main
 # ---------------------------------------------------------------------------
 # rehearsal: base = an older upstream main commit plus our patch, target = upstream main
 # ---------------------------------------------------------------------------
+# shellcheck source=/dev/null
 source "${here}/xs-sync.sh"
 set +e
 rrepo="${scratch}/rehearsal"
