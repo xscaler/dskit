@@ -1,19 +1,22 @@
-# xScaler fork: mirror upstream grafana/dskit and keep main on upstream main.
+# xScaler fork: mirror upstream grafana/dskit and keep main on upstream main plus our patch.
 #
-# dskit is a library with no upstream tags and no releases of ours, so only the
-# mirror half of the engine forks' sync applies here.
+# dskit is a library with no upstream tags and no releases of ours. main is
+# upstream main plus a patch (only our own xs-* workflow and script files), so
+# it never fast-forwards.
 #
 # Live runs (schedule, or workflow_dispatch on main):
 #   mirror      push upstream main (as upstream/main) and any new upstream tags to
 #               origin. Never pushes main, never touches *-xs.* tags.
-#   main-sync   moves main to upstream main while main has no commits of its own
-#               (an ancestor check, tolerant of an earlier rebase or squash merge of
-#               a sync PR). A direct fast-forward needs the App token with contents
-#               write. When the branch ruleset (protect-default: pull request
-#               required, no bypass actors) or protection stops the push, or the
-#               push is rejected, the job opens a PR from sync/upstream-<date> that
-#               holds upstream commits only. A main that has diverged gets the issue
-#               "sync: main has diverged from upstream" and nothing else.
+#   main-sync   finds the upstream main commit main is built on (the base) and
+#               takes the patch as the diff from the base to main. When upstream
+#               main has not moved past the base, there is nothing to do. When it
+#               has, the job builds a merge commit of main and upstream main whose
+#               tree is upstream main with the patch applied, through the git data
+#               API (signed by GitHub, Verified), pushes it to sync/upstream-<date>
+#               and opens a PR into main. A patch that does not apply opens the
+#               issue "sync: upstream main conflicts" and pushes nothing. A main
+#               that changes files outside the patch paths gets the issue "sync:
+#               main has diverged from upstream", listing those paths.
 #   report      opens or updates a "sync: failed" issue when a job fails.
 #
 # Upstream workflows: all stay disabled. The mirror pushes upstream main, and a new upstream
@@ -21,13 +24,22 @@
 # upstream's files) before the disable-upstream-workflows job of the next daily run
 # switches it off. The sync PR body lists the upstream changes under .github.
 #
-# A sync PR closed without merging is skipped, not re-opened. An open bot PR is moved to
-# the new upstream tip while its branch holds upstream commits only; otherwise it gets a
-# comment that it needs a manual update.
+# Namespace: upstream never owns xs-* workflows or scripts. The build fails when upstream
+# main carries such a path or the result would change main's; the mirror still copies
+# upstream refs but fails the run when upstream main or a new tag holds one; an xs-*
+# workflow that upstream main or main's upstream base also has is disabled like any
+# upstream one.
 #
-# Rehearsal runs (push to ci/**): the mirror prints what it would push, and
-# main-sync prints the decision for the live repository and proves the App token can
-# create and delete a rehearsal-sync/ branch. Nothing is pushed to main or upstream/.
+# A sync PR closed without merging is skipped for the upstream main tip its body records
+# (an xs-sync:upstream marker), not only for that day. An open bot PR is rebuilt
+# when main or upstream main moved, while its tip is still the bot's own verified
+# commit; otherwise it gets a comment that it needs a manual update.
+#
+# Rehearsal runs (push to ci/**): the mirror prints what it would push, and main-sync
+# prints the decision for the live repository, then rehearses the build: base is an
+# older upstream main commit plus our patch, target is upstream main. The built tree must
+# equal upstream main plus the patch and differ from it only at patch paths. It goes to a
+# rehearsal-sync/ branch that is deleted again; no PR, nothing pushed to main or upstream/.
 #
 # The logic lives in .github/scripts/xs-sync.sh, the tests in xs-sync-test.sh.
 name: xs-sync
@@ -90,7 +102,7 @@ jobs:
         run: .github/scripts/xs-install-tool.sh shellcheck
 
       - name: shellcheck
-        run: shellcheck -x .github/scripts/xs-sync.sh .github/scripts/xs-sync-test.sh
+        run: shellcheck -x -o all -e SC2312 .github/scripts/xs-sync.sh .github/scripts/xs-sync-test.sh .github/scripts/xs-install-tool.sh
 
       - name: Tests
         run: .github/scripts/xs-sync-test.sh
@@ -185,8 +197,8 @@ jobs:
           private-key: ${{ secrets.XS_AUTOMATION_APP_PRIVATE_KEY }}
           owner: xscaler
           repositories: ${{ github.event.repository.name }}
-          permission-contents: write # fast-forward of main, sync/upstream-* branch
-          permission-workflows: write # upstream commits carry workflow files
+          permission-contents: write # sync/upstream-* branch and its commit
+          permission-workflows: write # the merge commit carries upstream workflow files
           permission-pull-requests: write
           permission-issues: write
 
@@ -196,7 +208,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Move main
+      - name: Sync main
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           GH_REPO: ${{ github.repository }}
@@ -239,9 +251,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0 # upstream/main and the upstream base commit decide which xs-* workflows are ours
           persist-credentials: false
 
-      - name: Disable every workflow that is not xs-*
+      - name: Disable every workflow that is not ours
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           GH_REPO: ${{ github.repository }}
@@ -266,7 +279,8 @@ jobs:
           private-key: ${{ secrets.XS_AUTOMATION_APP_PRIVATE_KEY }}
           owner: xscaler
           repositories: ${{ github.event.repository.name }}
-          permission-contents: write # rehearsal-sync/* branch
+          permission-contents: write # rehearsal-sync/* branch and commit objects
+          permission-issues: write # rehearsal conflicts issue
           permission-workflows: write
 
       - name: Checkout
