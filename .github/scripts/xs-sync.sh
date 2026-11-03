@@ -485,11 +485,14 @@ xs_workflows_to_disable() {
 # xs_github_changes <old> <new>: non-xs paths under .github that differ, as "<added|modified|deleted> <path>".
 xs_github_changes() {
   local st p
+  local gl
+  gl="$(mktemp)"
+  git diff --no-renames --name-status -z "$1" "$2" -- .github > "${gl}" || die "${FUNCNAME[0]}: git failed"
   while IFS= read -r -d '' st && IFS= read -r -d '' p; do
     if xs_path_allowed "${p}"; then continue; fi
     case "${st}" in A) st=added ;; D) st=deleted ;; *) st=modified ;; esac
     printf '%s %s\n' "${st}" "${p}"
-  done < <(git diff --no-renames --name-status -z "$1" "$2" -- .github)
+  done < "${gl}"
 }
 
 # pr_state <head-branch>: the state of the PRs from this repository for that head.
@@ -747,6 +750,9 @@ api_call() {
 api_plan() {
   local base="$1" result="$2" meta path omode nmode osha nsha status blob
   local -a deleted=() added=()
+  local gl
+  gl="$(mktemp)"
+  git diff-tree -r -z --no-renames --raw "${base}" "${result}" > "${gl}" || die "${FUNCNAME[0]}: git failed"
   while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
     read -r omode nmode osha nsha status <<<"${meta#:}"
     case "${status}" in
@@ -769,7 +775,7 @@ api_plan() {
         ;;
       *) die "unexpected diff status ${status} at ${path}" ;;
     esac
-  done < <(git diff-tree -r -z --no-renames --raw "${base}" "${result}")
+  done < "${gl}"
 
   # A path that turns from file to directory or back cannot go through one
   # tree request with a base tree.
