@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "tenants": {
+    "t-alpha": {
+      "cardinality_analysis_enabled": true,
+      "compactor_blocks_retention_period": "2160h",
+      "ingestion_burst_size": 300000,
+      "ingestion_rate": 418,
+      "max_global_series_per_user": 25000
+    },
+    "t-beta": {
+      "cardinality_analysis_enabled": true,
+      "compactor_blocks_retention_period": "720h",
+      "ingestion_rate": 2500,
+      "max_global_series_per_user": 125000
+    },
+    "t-delta": {
+      "cardinality_analysis_enabled": true
+    },
+    "t-gamma": {
+      "cardinality_analysis_enabled": true,
+      "compactor_blocks_retention_period": "720h",
+      "ingestion_rate": 10000,
+      "max_global_series_per_user": 312500,
+      "metric_relabel_configs": [
+        {
+          "source_labels": [
+            "__name__"
+          ],
+          "regex": "debug_.*",
+          "action": "drop"
+        }
+      ]
+    }
+  }
+}

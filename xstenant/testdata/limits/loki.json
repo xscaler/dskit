@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "tenants": {
+    "t-alpha": {
+      "retention_period": "1080h"
+    },
+    "t-beta": {
+      "retention_period": "720h"
+    },
+    "t-gamma": {
+      "ingestion_rate_mb": 8,
+      "retention_period": "336h"
+    }
+  }
+}

@@ -166,11 +166,11 @@ expect "pr state merged" "merged 2" "$(echo '[{"number":2,"state":"MERGED","isCr
 expect "pr state closed" "closed 4" "$(echo '[{"number":4,"state":"CLOSED","isCrossRepository":false}]' | xs_pr_state)"
 expect "pr state fork ignored" "none" "$(echo '[{"number":5,"state":"OPEN","isCrossRepository":true}]' | xs_pr_state)"
 expect "pr state none" "none" "$(echo '[]' | xs_pr_state)"
-for p in .github/workflows/xs-sync.yml .github/scripts/xs-sync.sh; do
+for p in .github/workflows/xs-sync.yml .github/scripts/xs-sync.sh xstenant/go.mod xstenant/testdata/limits/mimir.json; do
   xs_path_allowed "${p}" && r=yes || r=no
   expect "allowed ${p}" yes "${r}"
 done
-for p in .github/workflows/test-build.yml .github/CODEOWNERS ring/ring.go; do
+for p in .github/workflows/test-build.yml .github/CODEOWNERS ring/ring.go xstenant.go tenant/xstenant/x.go; do
   xs_path_allowed "${p}" && r=yes || r=no
   expect "not allowed ${p}" no "${r}"
 done

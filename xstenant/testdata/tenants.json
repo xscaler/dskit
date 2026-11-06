@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "tenants": {
+    "t-alpha": {
+      "org_id": "org-1",
+      "state": "active",
+      "plan_id": "plan-pro"
+    },
+    "t-beta": {
+      "org_id": "org-2",
+      "state": "suspended",
+      "plan_id": "plan-pro"
+    },
+    "t-delta": {
+      "org_id": "org-3",
+      "state": "active",
+      "plan_id": "plan-ent"
+    },
+    "t-gamma": {
+      "org_id": "org-2",
+      "state": "soft_locked",
+      "plan_id": "plan-pro"
+    }
+  }
+}
