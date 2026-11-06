@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "tenants": {
+    "t-alpha": {
+      "compaction": {
+        "block_retention": "2160h"
+      }
+    },
+    "t-beta": {
+      "compaction": {
+        "block_retention": "720h"
+      },
+      "ingestion": {
+        "burst_size_bytes": 2000000
+      }
+    },
+    "t-gamma": {
+      "compaction": {
+        "block_retention": "168h"
+      },
+      "ingestion": {
+        "rate_limit_bytes": 5000000
+      }
+    }
+  }
+}
