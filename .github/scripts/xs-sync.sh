@@ -45,11 +45,12 @@ XS_UPSTREAM_URL="${XS_UPSTREAM_URL:-https://github.com/${XS_UPSTREAM_REPO}.git}"
 # Upstream branches to mirror as origin/upstream/<name>. dskit has no release
 # branches and no tags, only main.
 XS_BRANCH_REGEX="${XS_BRANCH_REGEX:-^main\$}"
-# Paths that may differ from upstream (our patch set). None yet, apart from our own
-# workflow files.
+# Paths that may differ from upstream (our patch set): our own workflow and script
+# files, and the xstenant module the engine forks require.
 XS_PATCH_PATHS=(
   ".github/workflows/xs-*"
   ".github/scripts/xs-*"
+  "xstenant/*"
 )
 # The namespace upstream must never own: paths that only this fork may carry.
 # Shell globs like XS_PATCH_PATHS, but workflows, scripts and actions only (not
