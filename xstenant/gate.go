@@ -131,10 +131,15 @@ func (r *Reader) CheckPush(tenant string, mode EnforceMode) (deny bool, reason s
 // stateDecisions returns the shared counter vec, reusing it when another
 // Reader already registered it on reg.
 func stateDecisions(reg prometheus.Registerer) *prometheus.CounterVec {
-	v := prometheus.NewCounterVec(prometheus.CounterOpts{
+	return registerOrReuse(reg, prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "xscaler_admin_store_state_decisions_total",
 		Help: "Push gate decisions by enforce mode, decision (allow, deny, would_deny) and reason.",
-	}, []string{"mode", "decision", "reason"})
+	}, []string{"mode", "decision", "reason"}))
+}
+
+// registerOrReuse registers v on reg, or returns the vec an earlier Reader
+// already registered under the same name.
+func registerOrReuse(reg prometheus.Registerer, v *prometheus.CounterVec) *prometheus.CounterVec {
 	if reg == nil {
 		return v
 	}

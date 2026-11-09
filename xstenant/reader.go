@@ -57,9 +57,10 @@ type Reader struct {
 	// reference for the generation-backwards check.
 	fromBucket atomic.Bool
 
-	decisions *prometheus.CounterVec
-	mu        sync.Mutex
-	callbacks []func(*Snapshot)
+	decisions     *prometheus.CounterVec
+	authDecisions *prometheus.CounterVec
+	mu            sync.Mutex
+	callbacks     []func(*Snapshot)
 }
 
 // New returns a Reader. A valid disk cache, if configured, is loaded here so
@@ -73,12 +74,13 @@ func New(cfg Config, bucket Bucket, logger log.Logger, reg prometheus.Registerer
 	}
 	cfg.applyDefaults()
 	r := &Reader{
-		cfg:       cfg,
-		bucket:    bucket,
-		logger:    logger,
-		m:         newMetrics(reg),
-		decisions: stateDecisions(reg),
-		now:       time.Now,
+		cfg:           cfg,
+		bucket:        bucket,
+		logger:        logger,
+		m:             newMetrics(reg),
+		decisions:     stateDecisions(reg),
+		authDecisions: authDecisionsVec(reg),
+		now:           time.Now,
 	}
 	if cfg.CacheDir != "" {
 		r.loadCache()

@@ -98,8 +98,7 @@ lifecycle functions:
 xscaler never blocks customer data except when the organisation is soft
 locked for billing (non payment). The control plane publishes that as
 `state: "soft_locked"` in `tenants.json`; reads stay allowed and only pushes
-are denied. Engines return their usual 429 with `Retry-After: 60`, matching
-proxy-auth's `rate_billing_soft_locked`.
+are denied. Engines return their usual 429 with `Retry-After: 60`.
 
 `PushAllowed(tenant) (allowed bool, reason string)` exists on `Reader` (current
 snapshot) and on `*Snapshot`, and is safe on a nil receiver:
@@ -135,6 +134,111 @@ Modes `shadow` and `on` count every decision in
 `decision` one of `allow`, `deny`, `would_deny`. Several Readers can share one
 registry; they share the counter.
 
+## API key authorization
+
+`Authorize` decides whether an API key may make a request to an engine. It
+takes strings only:
+
+```go
+d := r.CheckAuth(xstenant.AuthRequest{
+	Kind:          xstenant.KindLogs, // KindMetrics, KindLogs, KindTraces
+	Method:        req.Method,
+	Path:          req.URL.RequestURI(), // as the engine received it
+	PathPrefix:    "/prometheus",        // the engine's route prefix, if any
+	Authorization: req.Header.Get("Authorization"),
+	OrgID:         req.Header.Get("X-Scope-OrgID"),
+}, mode)
+if !d.Allowed {
+	// respond d.Status with d.Message; count or log d.Reason
+}
+if d.Enforced {
+	// replace X-Scope-OrgID with d.Tenant
+}
+```
+
+`Reader.Authorize` uses the current snapshot; `Snapshot.Authorize` is the same
+on a given snapshot. Both are safe on a nil receiver and do not count
+anything. An empty or unknown `Kind` is treated as metrics.
+
+`Path` is the request path as the engine received it; a query string and
+fragment are removed. `PathPrefix` is the engine's route prefix setting (for
+example `/prometheus` for Mimir). When `Path` starts with it, it is removed
+once before any check; a `Path` without it (the public form) is used as is.
+
+Rules, in order, first match wins:
+
+| # | condition                                                        | status | reason                 |
+|---|------------------------------------------------------------------|--------|------------------------|
+| 1 | `Authorization` is not `Bearer <token>` (two fields, case-insensitive scheme) | 401 | `missing_token`        |
+| 2 | `OrgID` is empty after trimming whitespace                       | 401    | `missing_scope_orgid`  |
+| 3 | no snapshot                                                      | 503    | `state_unavailable`    |
+| 4 | sha256 hex of the raw token not in `keys.json`                   | 401    | `unknown_token`        |
+| 5 | key has `expires_at` and it is not in the future                 | 401    | `key_expired`          |
+| 6 | tenant state is `suspended` in `tenants.json`                    | 401    | `tenant_inactive`      |
+| 7 | trimmed `OrgID` differs from the key's tenant                    | 401    | `scope_orgid_mismatch` |
+| 8 | path is empty, not allowed for the kind, or rejected (below)     | 403    | `path_not_allowed`     |
+| 9 | key lacks the needed scope                                       | 403    | `scope_read_missing` or `scope_write_missing` |
+
+Unknown, expired and inactive credentials all answer with the same client
+message (`unknown token`) so a caller cannot probe which tokens or tenants
+exist; `Reason` keeps the distinction. A tenant missing from `tenants.json` is
+allowed (as in `PushAllowed`). A `soft_locked` tenant is authorized here; the
+push gate denies its pushes. `Tenant` is set only when the request is allowed.
+
+`OrgID` is compared as received, after trimming. There is no default value:
+an empty or blank header is `missing_scope_orgid`, and any value that is not
+the key's tenant (`anonymous`, or several tenants joined with a comma) is
+`scope_orgid_mismatch`.
+
+Paths: the path is percent-decoded once, then checked. Percent-encoded dots,
+slashes and backslashes (`%2e`, `%2f`, `%5c`, any case), raw backslashes and
+invalid escapes are rejected, as are empty segments (`//`) and `.` or `..`
+segments. An empty path is rejected. The allowlist per kind is the public API
+of the engine, including the OTLP gRPC trace service
+(`/opentelemetry.proto.collector.trace.v1.TraceService/`) as a traces push
+path, the three Mimir cardinality endpoints and the rule forecast endpoint.
+
+Scopes: a push path (with or without a trailing slash) needs `write`. Paths
+that return secret-bearing config (Mimir's `/api/v1/alerts`, the Alertmanager
+status and multitenant pages) need `write` for every method. Rule, delete and
+Alertmanager config paths need `write` for any method other than GET, HEAD
+and OPTIONS; an empty method is not a read. Everything else needs `read`. A
+key whose `scopes` field is absent or null can read and write; an explicit
+empty list can do neither. A key with `["read"]` can query but never push or
+change config.
+
+### Rollout mode
+
+`CheckAuth(req, mode)` applies an `EnforceMode` (`off`, `shadow`, `on`):
+
+- `off`: returns `Allowed` true at once, without looking at the request.
+  Nothing is counted.
+- `shadow`: `Allowed` is true and `Enforced` is false. A request `Authorize`
+  would deny keeps its `Status`, `Reason` and `Message` but is counted as
+  `would_deny`.
+- `on`: the `Authorize` result, with `Enforced` true when it is allowed.
+
+An engine replaces `X-Scope-OrgID` with `Tenant` only when `Enforced` is true.
+In shadow and off it leaves the request as received, so a mode never changes
+routing. In shadow, act on `Allowed` only, not on `Status`.
+
+`shadow` and `on` count every decision in
+`xscaler_admin_store_auth_decisions_total{mode,kind,decision,reason}` with
+`decision` one of `allow`, `deny`, `would_deny`. Readers sharing a registry
+share the counter.
+
+### Where to apply it
+
+Engines must apply this only on external entry points, the listeners that
+receive customer requests. Traffic between components must not go through it.
+Shadow runs on external entry points whose requests were already authorized by
+another mechanism, so any `would_deny` is a disagreement to investigate before
+switching to `on`.
+
+Scope of the rules: there is no region or cluster check, since `keys.json` is
+per cell. `keys.json` has no key status, so a disabled key is simply absent
+(`unknown_token`).
+
 ## Wiring
 
 ```go
@@ -158,7 +262,8 @@ Metrics: `xscaler_admin_store_generation`,
 `xscaler_admin_store_fetch_failures_total{object,reason}` and
 `xscaler_admin_store_tenant_decode_failures_total{engine}` and
 `xscaler_admin_store_engine_limits_missing{engine}` and
-`xscaler_admin_store_state_decisions_total{mode,decision,reason}`.
+`xscaler_admin_store_state_decisions_total{mode,decision,reason}` and
+`xscaler_admin_store_auth_decisions_total{mode,kind,decision,reason}`.
 
 Alerting:
 
