@@ -3,6 +3,7 @@ package xstenant
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -717,5 +718,82 @@ func TestIsCardinalityPath(t *testing.T) {
 		if got := isCardinalityPath(p); got != want {
 			t.Errorf("isCardinalityPath(%q) = %v, want %v", p, got, want)
 		}
+	}
+}
+
+func TestAuthorizeExtraReadPaths(t *testing.T) {
+	s := authSnap()
+	extra := []string{"/api/v1/extra", "/custom/read"}
+	do := func(kind Kind, method, path, tok string, paths []string) AuthDecision {
+		r := areq(kind, method, path, tok)
+		r.ExtraReadPaths = paths
+		return s.Authorize(r)
+	}
+	for _, kind := range []Kind{KindMetrics, KindLogs, KindTraces} {
+		if d := do(kind, "GET", "/custom/read", "read", extra); !d.Allowed || d.Tenant != "tenant-1" {
+			t.Errorf("%s: read key: %+v", kind, d)
+		}
+		if d := do(kind, "POST", "/custom/read?x=1#f", "read", extra); !d.Allowed {
+			t.Errorf("%s: query string: %+v", kind, d)
+		}
+		d := do(kind, "GET", "/custom/read", "write", extra)
+		if d.Allowed || d.Status != 403 || d.Reason != ReasonScopeReadMissing {
+			t.Errorf("%s: write-only key: %+v", kind, d)
+		}
+	}
+	for _, p := range []string{"/custom/read/", "/custom/read/x", "/custom", "/custom/rea", "/Custom/read", "/custom/read2", "//custom/read", "/x/../custom/read", "/custom/./read", "/custom%2fread", "/custom%2Fread", "/custom/%2e/read"} {
+		d := do(KindMetrics, "GET", p, "rw", extra)
+		if d.Allowed || d.Reason != ReasonPathNotAllowed {
+			t.Errorf("%q: %+v", p, d)
+		}
+	}
+	// unset or empty entries change nothing
+	for _, paths := range [][]string{nil, {}, {""}} {
+		if d := do(KindMetrics, "GET", "/custom/read", "rw", paths); d.Allowed || d.Reason != ReasonPathNotAllowed {
+			t.Errorf("paths %q: %+v", paths, d)
+		}
+		if d := do(KindMetrics, "GET", "/api/v1/query", "read", paths); !d.Allowed {
+			t.Errorf("builtin read path: %+v", d)
+		}
+	}
+	// prefix stripping happens before the match
+	r := areq(KindMetrics, "GET", "/prometheus/custom/read", "read")
+	r.PathPrefix, r.ExtraReadPaths = "/prometheus", extra
+	if d := s.Authorize(r); !d.Allowed {
+		t.Errorf("prefixed: %+v", d)
+	}
+	// an extra path never downgrades a built-in push or config path
+	if d := do(KindMetrics, "POST", "/api/v1/push", "read", []string{"/api/v1/push"}); d.Allowed || d.Reason != ReasonScopeWriteMissing {
+		t.Errorf("push downgrade: %+v", d)
+	}
+	if d := do(KindMetrics, "POST", "/api/v1/rules", "read", []string{"/api/v1/rules"}); d.Allowed || d.Reason != ReasonScopeWriteMissing {
+		t.Errorf("config downgrade: %+v", d)
+	}
+}
+
+func TestAuthorizeKeyIdentity(t *testing.T) {
+	doc := `{"schema":1,"keys":{
+	  "` + tokHash("full") + `":{"tenant_id":"tenant-1","scopes":["read"],"key_id":"k-1","managed":true},
+	  "` + tokHash("idonly") + `":{"tenant_id":"tenant-1","scopes":["read"],"key_id":"k-2"},
+	  "` + tokHash("old") + `":{"tenant_id":"tenant-1","scopes":["read"],"expires_at":null}}}`
+	var kd keysDoc
+	if err := json.Unmarshal([]byte(doc), &kd); err != nil {
+		t.Fatal(err)
+	}
+	s := &Snapshot{now: func() time.Time { return authNow }, keys: kd.Keys}
+	cases := []struct {
+		tok     string
+		keyID   string
+		managed bool
+	}{{"full", "k-1", true}, {"idonly", "k-2", false}, {"old", "", false}}
+	for _, c := range cases {
+		d := s.Authorize(areq(KindMetrics, "GET", "/api/v1/query", c.tok))
+		if !d.Allowed || d.KeyID != c.keyID || d.Managed != c.managed {
+			t.Errorf("%s: %+v", c.tok, d)
+		}
+	}
+	d := s.Authorize(areq(KindMetrics, "POST", "/api/v1/push", "full"))
+	if d.Allowed || d.KeyID != "" || d.Managed {
+		t.Errorf("denied decision carries identity: %+v", d)
 	}
 }

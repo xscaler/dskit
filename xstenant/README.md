@@ -165,6 +165,14 @@ fragment are removed. `PathPrefix` is the engine's route prefix setting (for
 example `/prometheus` for Mimir). When `Path` starts with it, it is removed
 once before any check; a `Path` without it (the public form) is used as is.
 
+`ExtraReadPaths` lets a deployment that serves extra read APIs next to an
+engine allow them per request. Each entry is matched exactly against the
+cleaned path (after query-string removal and prefix stripping), so prefixes,
+trailing slashes and case variants do not match. A match needs the `read`
+scope for every method and is never treated as a push or config path. The
+dot-segment and encoding checks apply first. A path the built-in allowlist
+already covers keeps its built-in scope. Unset, nothing changes.
+
 Rules, in order, first match wins:
 
 | # | condition                                                        | status | reason                 |
@@ -206,6 +214,12 @@ and OPTIONS; an empty method is not a read. Everything else needs `read`. A
 key whose `scopes` field is absent or null can read and write; an explicit
 empty list can do neither. A key with `["read"]` can query but never push or
 change config.
+
+A `keys.json` entry may also carry `key_id` (string) and `managed` (bool).
+Both are optional; an entry without them stays valid and reads as an empty
+`KeyID` and `Managed` false. When a request is allowed, `AuthDecision.KeyID`
+and `AuthDecision.Managed` return them so a caller can attribute the request
+to a key. A denied decision carries neither.
 
 ### Rollout mode
 

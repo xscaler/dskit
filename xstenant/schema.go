@@ -50,6 +50,10 @@ type keyRecord struct {
 	TenantID  string     `json:"tenant_id"`
 	Scopes    []string   `json:"scopes"`
 	ExpiresAt *time.Time `json:"expires_at"`
+	// KeyID and Managed are optional; documents written before they existed
+	// leave them empty and false.
+	KeyID   string `json:"key_id"`
+	Managed bool   `json:"managed"`
 }
 
 type keysDoc struct {
