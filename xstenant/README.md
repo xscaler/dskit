@@ -93,6 +93,48 @@ lifecycle functions:
   the same, is not decoded again.
 - `WaitApplied` with a timeout of zero or less waits until `ctx` is done.
 
+## Push gate
+
+xscaler never blocks customer data except when the organisation is soft
+locked for billing (non payment). The control plane publishes that as
+`state: "soft_locked"` in `tenants.json`; reads stay allowed and only pushes
+are denied. Engines return their usual 429 with `Retry-After: 60`, matching
+proxy-auth's `rate_billing_soft_locked`.
+
+`PushAllowed(tenant) (allowed bool, reason string)` exists on `Reader` (current
+snapshot) and on `*Snapshot`, and is safe on a nil receiver:
+
+| input                                        | allowed | reason                |
+|----------------------------------------------|---------|-----------------------|
+| no snapshot                                  | yes     | `no_state`            |
+| tenant not in the snapshot                   | yes     | `unknown_tenant`      |
+| `soft_locked`                                | no      | `billing_soft_locked` |
+| `active`, `suspended`, any unknown state     | yes     | `allowed`             |
+
+Nothing else ever denies a push. `suspended` is handled by auth, not here.
+
+`CheckPush(tenant, mode) (deny bool, reason string)` applies a rollout mode.
+`EnforceMode` implements `flag.Value` (`off`, `shadow`, `on`; zero value is
+`off`):
+
+- `off`: always allow, nothing counted.
+- `shadow`: always allow; a soft locked tenant is counted as `would_deny`.
+- `on`: deny a soft locked tenant, allow everything else.
+
+```go
+var mode xstenant.EnforceMode
+flag.Var(&mode, "tenant-state.enforce", "off, shadow or on")
+...
+if deny, reason := r.CheckPush(tenantID, mode); deny {
+	// respond 429, Retry-After: 60, reason
+}
+```
+
+Modes `shadow` and `on` count every decision in
+`xscaler_admin_store_state_decisions_total{mode,decision,reason}` with
+`decision` one of `allow`, `deny`, `would_deny`. Several Readers can share one
+registry; they share the counter.
+
 ## Wiring
 
 ```go
@@ -115,7 +157,8 @@ Metrics: `xscaler_admin_store_generation`,
 `xscaler_admin_store_last_success_timestamp_seconds`,
 `xscaler_admin_store_fetch_failures_total{object,reason}` and
 `xscaler_admin_store_tenant_decode_failures_total{engine}` and
-`xscaler_admin_store_engine_limits_missing{engine}`.
+`xscaler_admin_store_engine_limits_missing{engine}` and
+`xscaler_admin_store_state_decisions_total{mode,decision,reason}`.
 
 Alerting:
 
