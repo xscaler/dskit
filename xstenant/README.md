@@ -215,6 +215,12 @@ key whose `scopes` field is absent or null can read and write; an explicit
 empty list can do neither. A key with `["read"]` can query but never push or
 change config.
 
+A `keys.json` entry may also carry `key_id` (string) and `managed` (bool).
+Both are optional; an entry without them stays valid and reads as an empty
+`KeyID` and `Managed` false. When a request is allowed, `AuthDecision.KeyID`
+and `AuthDecision.Managed` return them so a caller can attribute the request
+to a key. A denied decision carries neither.
+
 ### Rollout mode
 
 `CheckAuth(req, mode)` applies an `EnforceMode` (`off`, `shadow`, `on`):

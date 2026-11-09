@@ -92,9 +92,14 @@ type AuthDecision struct {
 	Allowed  bool
 	Enforced bool
 	Tenant   string
-	Status   int
-	Reason   string
-	Message  string
+	// KeyID and Managed are the key's optional key_id and managed fields
+	// from keys.json, set only when the request is allowed. They are empty
+	// and false for a key that does not carry them.
+	KeyID   string
+	Managed bool
+	Status  int
+	Reason  string
+	Message string
 }
 
 func deny(status int, reason, msg string) AuthDecision {
@@ -171,7 +176,7 @@ func (s *Snapshot) Authorize(req AuthRequest) AuthDecision {
 	if !allowsScope(k.Scopes, needed) {
 		return deny(http.StatusForbidden, "scope_"+needed+"_missing", "api key lacks "+needed+" scope")
 	}
-	return AuthDecision{Allowed: true, Tenant: k.TenantID, Reason: ReasonAuthAllowed}
+	return AuthDecision{Allowed: true, Tenant: k.TenantID, KeyID: k.KeyID, Managed: k.Managed, Reason: ReasonAuthAllowed}
 }
 
 // allowsScope reports whether a key may do an operation that needs scope. A

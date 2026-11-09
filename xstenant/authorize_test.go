@@ -3,6 +3,7 @@ package xstenant
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -767,5 +768,32 @@ func TestAuthorizeExtraReadPaths(t *testing.T) {
 	}
 	if d := do(KindMetrics, "POST", "/api/v1/rules", "read", []string{"/api/v1/rules"}); d.Allowed || d.Reason != ReasonScopeWriteMissing {
 		t.Errorf("config downgrade: %+v", d)
+	}
+}
+
+func TestAuthorizeKeyIdentity(t *testing.T) {
+	doc := `{"schema":1,"keys":{
+	  "` + tokHash("full") + `":{"tenant_id":"tenant-1","scopes":["read"],"key_id":"k-1","managed":true},
+	  "` + tokHash("idonly") + `":{"tenant_id":"tenant-1","scopes":["read"],"key_id":"k-2"},
+	  "` + tokHash("old") + `":{"tenant_id":"tenant-1","scopes":["read"],"expires_at":null}}}`
+	var kd keysDoc
+	if err := json.Unmarshal([]byte(doc), &kd); err != nil {
+		t.Fatal(err)
+	}
+	s := &Snapshot{now: func() time.Time { return authNow }, keys: kd.Keys}
+	cases := []struct {
+		tok     string
+		keyID   string
+		managed bool
+	}{{"full", "k-1", true}, {"idonly", "k-2", false}, {"old", "", false}}
+	for _, c := range cases {
+		d := s.Authorize(areq(KindMetrics, "GET", "/api/v1/query", c.tok))
+		if !d.Allowed || d.KeyID != c.keyID || d.Managed != c.managed {
+			t.Errorf("%s: %+v", c.tok, d)
+		}
+	}
+	d := s.Authorize(areq(KindMetrics, "POST", "/api/v1/push", "full"))
+	if d.Allowed || d.KeyID != "" || d.Managed {
+		t.Errorf("denied decision carries identity: %+v", d)
 	}
 }
