@@ -62,13 +62,23 @@ func (s *Snapshot) State(tenant string) (TenantState, bool) {
 
 // Authenticate looks the token up by its sha256 hash.
 func (s *Snapshot) Authenticate(token string) (Principal, error) {
+	k, err := s.lookupKey(token)
+	if err != nil {
+		return Principal{}, err
+	}
+	return Principal{TenantID: k.TenantID, Scopes: append([]string(nil), k.Scopes...)}, nil
+}
+
+// lookupKey returns the key record for the token, unmodified, so a caller can
+// tell an absent scopes field (nil) from an empty list.
+func (s *Snapshot) lookupKey(token string) (keyRecord, error) {
 	sum := sha256.Sum256([]byte(token))
 	k, ok := s.keys[hex.EncodeToString(sum[:])]
 	if !ok {
-		return Principal{}, ErrUnknownKey
+		return keyRecord{}, ErrUnknownKey
 	}
 	if k.ExpiresAt != nil && !s.now().Before(*k.ExpiresAt) {
-		return Principal{}, ErrExpiredKey
+		return keyRecord{}, ErrExpiredKey
 	}
-	return Principal{TenantID: k.TenantID, Scopes: append([]string(nil), k.Scopes...)}, nil
+	return k, nil
 }
