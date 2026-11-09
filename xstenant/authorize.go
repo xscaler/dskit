@@ -67,6 +67,15 @@ type AuthRequest struct {
 	// is removed before every check. A Path without it (the public form) is
 	// used as is.
 	PathPrefix string
+	// ExtraReadPaths lists additional paths the caller serves next to the
+	// engine and wants API keys to reach for this request's Kind. Each entry
+	// is matched exactly against the path after query-string removal and
+	// prefix stripping: no prefix, case or trailing-slash variants. A match
+	// needs the read scope for every method and is never treated as a push
+	// or config path. The path hygiene checks (dot segments, encoded dots
+	// and slashes) run first. A path the built-in allowlist already covers
+	// keeps its built-in classification. Unset, behaviour is unchanged.
+	ExtraReadPaths []string
 }
 
 // AuthDecision is the outcome. Status is the HTTP status to answer with when
@@ -114,6 +123,7 @@ func (r *Reader) Authorize(req AuthRequest) AuthDecision {
 //  7. OrgID differs from the key's tenant: 401 scope_orgid_mismatch.
 //  8. path empty, ambiguous, encoded in a way that hides a separator or dot,
 //     or not allowed for the Kind: 403 path_not_allowed.
+//     A path in ExtraReadPaths is allowed here and needs the read scope.
 //  9. key lacks the scope the request needs: 403 scope_read_missing or
 //     scope_write_missing.
 //
@@ -149,10 +159,15 @@ func (s *Snapshot) Authorize(req AuthRequest) AuthDecision {
 
 	kind := normalizeKind(req.Kind)
 	path, ok := cleanPath(req.Path, req.PathPrefix)
-	if !ok || !pathAllowed(path, kind) {
+	if !ok || path == "" || hasAmbiguousSegments(path) {
 		return deny(http.StatusForbidden, ReasonPathNotAllowed, "unsupported path")
 	}
-	needed := requiredScope(req.Method, path, kind)
+	needed := scopeRead
+	if pathAllowed(path, kind) {
+		needed = requiredScope(req.Method, path, kind)
+	} else if !slices.Contains(req.ExtraReadPaths, path) {
+		return deny(http.StatusForbidden, ReasonPathNotAllowed, "unsupported path")
+	}
 	if !allowsScope(k.Scopes, needed) {
 		return deny(http.StatusForbidden, "scope_"+needed+"_missing", "api key lacks "+needed+" scope")
 	}
