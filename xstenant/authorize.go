@@ -97,9 +97,34 @@ type AuthDecision struct {
 	// and false for a key that does not carry them.
 	KeyID   string
 	Managed bool
-	Status  int
-	Reason  string
-	Message string
+	// Path, Push and RequiredScope report how Authorize classified the
+	// request, so a caller does not re-derive it from the raw request path.
+	// Path is the cleaned path: query and fragment removed, route prefix
+	// stripped, percent-encoding decoded once. Push is true when that path is
+	// a push path for the Kind (a trailing slash included), the same rule
+	// that selects the write scope. RequiredScope is "read" or "write".
+	//
+	// Path is set whenever the path was cleaned, allowed or denied, including
+	// a path_not_allowed denial. Push and RequiredScope are set once the path
+	// passed the allowlist, so they are also set on scope_read_missing and
+	// scope_write_missing. All three are empty or false for a denial before
+	// the path step (missing_token, missing_scope_orgid, state_unavailable,
+	// unknown_token, key_expired, tenant_inactive, scope_orgid_mismatch), for
+	// a path that does not clean, and for a decision CheckAuth returns in
+	// mode off.
+	Path          string
+	Push          bool
+	RequiredScope string
+	// SoftLocked is true when the request is allowed, is a push, and the
+	// tenant is soft_locked. It is the push gate on the same classification
+	// as Push, so a caller can answer 429 with Retry-After: 60 without a
+	// second look at the path. It reports state only; it does not apply a
+	// rollout mode. A caller with a mode uses CheckPush(d.Tenant, mode) when
+	// d.Push is true.
+	SoftLocked bool
+	Status     int
+	Reason     string
+	Message    string
 }
 
 func deny(status int, reason, msg string) AuthDecision {
@@ -164,19 +189,39 @@ func (s *Snapshot) Authorize(req AuthRequest) AuthDecision {
 
 	kind := normalizeKind(req.Kind)
 	path, ok := cleanPath(req.Path, req.PathPrefix)
-	if !ok || path == "" || hasAmbiguousSegments(path) {
+	if !ok {
 		return deny(http.StatusForbidden, ReasonPathNotAllowed, "unsupported path")
+	}
+	if path == "" || hasAmbiguousSegments(path) {
+		d := deny(http.StatusForbidden, ReasonPathNotAllowed, "unsupported path")
+		d.Path = path
+		return d
 	}
 	needed := scopeRead
+	push := false
 	if pathAllowed(path, kind) {
 		needed = requiredScope(req.Method, path, kind)
+		push = isPushPath(path, kind)
 	} else if !slices.Contains(req.ExtraReadPaths, path) {
-		return deny(http.StatusForbidden, ReasonPathNotAllowed, "unsupported path")
+		d := deny(http.StatusForbidden, ReasonPathNotAllowed, "unsupported path")
+		d.Path = path
+		return d
 	}
 	if !allowsScope(k.Scopes, needed) {
-		return deny(http.StatusForbidden, "scope_"+needed+"_missing", "api key lacks "+needed+" scope")
+		d := deny(http.StatusForbidden, "scope_"+needed+"_missing", "api key lacks "+needed+" scope")
+		d.Path, d.Push, d.RequiredScope = path, push, needed
+		return d
 	}
-	return AuthDecision{Allowed: true, Tenant: k.TenantID, KeyID: k.KeyID, Managed: k.Managed, Reason: ReasonAuthAllowed}
+	locked := false
+	if push {
+		if st, ok := s.tenants[k.TenantID]; ok && st.State == StateSoftLocked {
+			locked = true
+		}
+	}
+	return AuthDecision{
+		Allowed: true, Tenant: k.TenantID, KeyID: k.KeyID, Managed: k.Managed, Reason: ReasonAuthAllowed,
+		Path: path, Push: push, RequiredScope: needed, SoftLocked: locked,
+	}
 }
 
 // allowsScope reports whether a key may do an operation that needs scope. A
