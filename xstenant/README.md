@@ -221,6 +221,28 @@ Both are optional; an entry without them stays valid and reads as an empty
 and `AuthDecision.Managed` return them so a caller can attribute the request
 to a key. A denied decision carries neither.
 
+### Classification on the decision
+
+`Authorize` is the single source for how a request was classified, so callers
+do not re-derive it from the raw path (which can differ from the cleaned,
+decoded one):
+
+- `Path`: the cleaned path (query and fragment removed, route prefix
+  stripped, decoded once).
+- `Push`: the path is a push path for the kind, trailing slash included.
+- `RequiredScope`: `read` or `write`.
+- `SoftLocked`: the request is allowed, `Push` is true and the tenant is
+  `soft_locked`. Answer 429 with `Retry-After: 60`, or apply a rollout mode
+  with `CheckPush(d.Tenant, mode)` when `d.Push` is true.
+
+`Path` is set whenever the path cleaned, allowed or denied. `Push` and
+`RequiredScope` are set once the path passed the allowlist (so also on
+`scope_read_missing` and `scope_write_missing`). All are unset for denials
+before the path step (`missing_token`, `missing_scope_orgid`,
+`state_unavailable`, `unknown_token`, `key_expired`, `tenant_inactive`,
+`scope_orgid_mismatch`), for a path that does not clean, and for `CheckAuth`
+in mode `off`.
+
 ### Rollout mode
 
 `CheckAuth(req, mode)` applies an `EnforceMode` (`off`, `shadow`, `on`):

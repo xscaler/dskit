@@ -797,3 +797,71 @@ func TestAuthorizeKeyIdentity(t *testing.T) {
 		t.Errorf("denied decision carries identity: %+v", d)
 	}
 }
+
+func TestAuthorizeClassification(t *testing.T) {
+	s := authSnap()
+	lreq := func(path string) AuthRequest {
+		r := areq(KindMetrics, http.MethodPost, path, "locked")
+		r.OrgID = "tenant-l"
+		return r
+	}
+	cases := []struct {
+		name   string
+		req    AuthRequest
+		path   string
+		push   bool
+		scope  string
+		locked bool
+	}{
+		{"encoded push", areq(KindMetrics, http.MethodPost, "/api/v1/pus%68?x=1", "rw"), "/api/v1/push", true, "write", false},
+		{"trailing slash push", areq(KindLogs, http.MethodPost, "/loki/api/v1/push/", "rw"), "/loki/api/v1/push/", true, "write", false},
+		{"read path", areq(KindMetrics, http.MethodGet, "/api/v1/query?q=up", "rw"), "/api/v1/query", false, "read", false},
+		{"prefix stripped", func() AuthRequest {
+			r := areq(KindMetrics, http.MethodPost, "/prometheus/api/v1/push", "rw")
+			r.PathPrefix = "/prometheus"
+			return r
+		}(), "/api/v1/push", true, "write", false},
+		{"locked encoded push", lreq("/api/v1/pus%68"), "/api/v1/push", true, "write", true},
+		{"locked read", func() AuthRequest { r := lreq("/api/v1/query"); r.Method = http.MethodGet; return r }(), "/api/v1/query", false, "read", false},
+		{"locked config write is not a push", func() AuthRequest { r := lreq("/api/v1/rules"); r.Method = http.MethodPost; return r }(), "/api/v1/rules", false, "write", false},
+	}
+	for _, c := range cases {
+		d := s.Authorize(c.req)
+		if !d.Allowed {
+			t.Fatalf("%s: denied: %+v", c.name, d)
+		}
+		if d.Path != c.path || d.Push != c.push || d.RequiredScope != c.scope || d.SoftLocked != c.locked {
+			t.Errorf("%s: got path=%q push=%v scope=%q locked=%v", c.name, d.Path, d.Push, d.RequiredScope, d.SoftLocked)
+		}
+	}
+}
+
+func TestAuthorizeClassificationOnDeny(t *testing.T) {
+	s := authSnap()
+	// Scope denial still reports the classification; the soft lock is only
+	// reported for an allowed request.
+	d := s.Authorize(areq(KindMetrics, http.MethodPost, "/api/v1/pus%68", "read"))
+	if d.Allowed || d.Reason != ReasonScopeWriteMissing || d.Path != "/api/v1/push" || !d.Push || d.RequiredScope != "write" || d.SoftLocked {
+		t.Errorf("scope denial: %+v", d)
+	}
+	// A path off the allowlist reports only the cleaned path.
+	d = s.Authorize(areq(KindMetrics, http.MethodGet, "/nope", "rw"))
+	if d.Reason != ReasonPathNotAllowed || d.Path != "/nope" || d.Push || d.RequiredScope != "" {
+		t.Errorf("not allowed: %+v", d)
+	}
+	// Early denials and paths that do not clean leave all fields unset.
+	for name, r := range map[string]AuthRequest{
+		"missing token": {Kind: KindMetrics, Method: http.MethodPost, Path: "/api/v1/push", OrgID: "tenant-1"},
+		"bad org":       {Kind: KindMetrics, Method: http.MethodPost, Path: "/api/v1/push", Authorization: "Bearer rw", OrgID: "other"},
+		"hidden slash":  areq(KindMetrics, http.MethodPost, "/api/v1%2fpush", "rw"),
+	} {
+		d := s.Authorize(r)
+		if d.Allowed || d.Path != "" || d.Push || d.RequiredScope != "" || d.SoftLocked {
+			t.Errorf("%s: %+v", name, d)
+		}
+	}
+	// Ambiguous but cleanable path reports the path.
+	if d := s.Authorize(areq(KindMetrics, http.MethodPost, "/api/v1//push", "rw")); d.Reason != ReasonPathNotAllowed || d.Path != "/api/v1//push" {
+		t.Errorf("ambiguous: %+v", d)
+	}
+}
