@@ -2,7 +2,7 @@ module github.com/grafana/dskit
 
 go 1.26.10
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/alecthomas/units v0.0.0-20240927000941-0f3dac36c52b
@@ -18,7 +18,7 @@ require (
 	github.com/golang/snappy v1.0.0
 	github.com/google/go-cmp v0.7.0
 	github.com/gorilla/mux v1.8.1
-	github.com/grafana/gomemcache v0.0.0-20260728143316-9448343bd654
+	github.com/grafana/gomemcache v0.0.0-20261112174412-3f2aa5dee9f7
 	github.com/grafana/otel-profiling-go v0.7.0
 	github.com/grafana/pyroscope-go/godeltaprof v0.1.12
 	github.com/hashicorp/consul/api/v2 v2.0.0
