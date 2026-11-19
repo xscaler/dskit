@@ -2038,6 +2038,38 @@ func TestMetricsRegistration(t *testing.T) {
 
 }
 
+// scrapingRegisterer gathers the registry right after every registration, simulating a
+// scrape that runs concurrently with the registration of the KV metrics.
+type scrapingRegisterer struct {
+	*prometheus.Registry
+	scrape func()
+}
+
+func (r scrapingRegisterer) Register(c prometheus.Collector) error {
+	defer r.scrape()
+	return r.Registry.Register(c)
+}
+
+func (r scrapingRegisterer) MustRegister(cs ...prometheus.Collector) {
+	defer r.scrape()
+	r.Registry.MustRegister(cs...)
+}
+
+func TestMetricsScrapedWhileKVIsBeingCreated(t *testing.T) {
+	var cfg KVConfig
+	flagext.DefaultValues(&cfg)
+
+	reg := scrapingRegisterer{Registry: prometheus.NewPedanticRegistry()}
+	reg.scrape = func() {
+		_, err := reg.Gather()
+		require.NoError(t, err)
+	}
+
+	require.NotPanics(t, func() {
+		NewKV(cfg, log.NewNopLogger(), &staticDNSProviderMock{}, reg)
+	})
+}
+
 func decodeDataFromMarshalledKeyValuePair(t *testing.T, marshalledKVP []byte, key string, codec dataCodec) *data {
 	kvp := KeyValuePair{}
 	require.NoError(t, kvp.Unmarshal(marshalledKVP))
@@ -2683,6 +2715,62 @@ func TestMemberlist_WatchKey_ShouldStartNotifyingChangesBeforeFullJoinIsComplete
 			close(producerDone)
 			producerWait.Wait()
 
+		})
+	}
+}
+
+func TestMemberlist_WatchKey_ShouldNotifyCurrentValueOnStart(t *testing.T) {
+	const name = "Ing 1"
+
+	tests := map[string]struct {
+		setBeforeWatch bool
+	}{
+		"key is set before the watch starts": {
+			setBeforeWatch: true,
+		},
+		"key is set while the watch starts": {
+			setBeforeWatch: false,
+		},
+	}
+
+	for testName, testData := range tests {
+		t.Run(testName, func(t *testing.T) {
+			withFixtures(t, func(t *testing.T, kv *Client) {
+				// A value set before WatchKey() is called (for example, between a caller's Get() and
+				// WatchKey()) produces no change notification for the watcher, so it must be delivered
+				// as the current value.
+				if testData.setBeforeWatch {
+					require.NoError(t, cas(kv, key, updateFn(name)))
+				}
+
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+
+				received := make(chan interface{}, 1)
+				watchDone := make(chan struct{})
+				go func() {
+					defer close(watchDone)
+					kv.WatchKey(ctx, key, func(in interface{}) bool {
+						received <- in
+						return false
+					})
+				}()
+
+				if !testData.setBeforeWatch {
+					// This can run before or after the watcher is registered.
+					require.NoError(t, cas(kv, key, updateFn(name)))
+				}
+
+				select {
+				case in := <-received:
+					// A missing key must not be delivered as a nil value.
+					require.NotNil(t, in)
+					require.Contains(t, in.(*data).Members, name)
+				case <-ctx.Done():
+					require.Fail(t, "WatchKey() has not notified the current value before the test timeout expired")
+				}
+				<-watchDone
+			})
 		})
 	}
 }
